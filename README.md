@@ -1,120 +1,184 @@
-\# ACS 2.0 — Authenticated Command System
+# ACS 2.0 — Authenticated Command System
 
+> An IoT command delivery system built on Bitcoin that cannot be tracked, forged, or repudiated.
 
+---
 
-> 無法被追蹤、無法被偽造、無法被否認的區塊鏈 IoT 指令傳遞系統
+## Overview
 
-
-
-\## 簡介
-
-
-
-ACS 2.0 使用比特幣 Regtest 區塊鏈作為 IoT 指令傳遞總線，透過 OP\_RETURN 欄位傳遞加密指令，Monitor 端根據確認數階梯式觸發實體硬體動作。
-
-
-
-\## 系統架構
+ACS 2.0 uses a **Bitcoin Regtest blockchain** as a tamper-proof IoT command bus.
+Commands are encrypted and embedded in transaction `OP_RETURN` fields. A monitoring daemon watches the chain and triggers physical hardware actions once the required number of block confirmations is reached.
 
 ```
-
-Sender → Bitcoin Regtest → Monitor → 硬體觸發
-
+Sender ──► Bitcoin Regtest Node ──► Monitor ──► Hardware Trigger (GPIO)
+           (OP_RETURN payload)       (ZMQ)        Phase 6
 ```
 
+---
 
+## Key Features
 
-\## 核心特性
+| Feature | Description |
+|---------|-------------|
+| 🔐 **ECDSA Signatures** | Commands signed with a private key — impossible to forge without it |
+| ⏱️ **Replay Attack Prevention** | Timestamp validated within ±600 seconds (Phase 2) |
+| 📋 **Immutable Audit Log** | Every action appended to `audit_log.json` with txid and block height |
+| 🔀 **Address Rotation + Noise** | New Bech32 address per tx; 1–3 decoy transactions injected (Phase 4) |
+| 🔒 **ECDH + AES-256-GCM** | Command payload encrypted with X25519 key exchange (Phase 5) |
+| 🌿 **Taproot Addresses** | Transactions use `bech32m` format, indistinguishable from normal transfers |
+| ⚡ **GPIO Hardware Trigger** | Simulated RPi.GPIO interface with full audit logging (Phase 6) |
 
+---
 
+## Confirmation Ladder State Machine
 
-\- 🔐 ECDSA 公鑰簽章，無私鑰者無法偽造指令
+The monitor reacts at three confirmation thresholds:
 
-\- ⏱️ Timestamp 防重放，±600秒有效期
+| Confirmations | State | Action |
+|:---:|---|---|
+| 0 | `ALERT` | Signal detected — begin tracking txid |
+| 3 | `READY` | Preparing to execute |
+| 6 | `EXECUTE` | Trigger hardware action (`UNLOCK_DOOR_01`) |
 
-\- 📋 公開審計日誌，每個動作都可追溯
+---
 
-\- 🔀 地址跳變 + 噪音注入，隱蔽真實指令
+## File Structure
 
-\- 🔒 ECDH + AES-256-GCM 加密指令內容
+```
+ACS/
+├── sender.py            # Phase 1–5: build, sign, encrypt & broadcast command tx
+├── monitor.py           # Phase 1–3: ZMQ listener, timestamp check, state machine
+├── gpio_mock.py         # Phase 6: simulated RPi.GPIO (setup/output/cleanup)
+├── phase6_listener.py   # Phase 6: ZMQ → OP_RETURN → decrypt → GPIO trigger
+├── demo_run.py          # Phase 6: end-to-end simulation demo
+├── audit_log.json       # Append-only audit trail (auto-generated)
+├── gpio_log.txt         # GPIO trigger history (auto-generated)
+└── pending_txid.txt     # IPC file: sender → monitor handoff
+```
 
-\- 🌿 Taproot 地址，交易外觀與普通交易相同
+---
 
+## Requirements
 
-
-\## 確認階梯狀態機
-
-
-
-| 確認數 | 狀態 | 動作 |
-
-|--------|------|------|
-
-| 0 | ALERT | 偵測到指令，開始監控 |
-
-| 3 | READY | 預備執行 |
-
-| 6 | EXECUTE | 觸發實體硬體 |
-
-
-
-\## 環境需求
-
-
-
-\- Bitcoin Core v28+ (Regtest)
-
-\- Python 3.12+
-
-\- 套件：`pip install pyzmq requests cryptography`
-
-
-
-\## 使用方式
-
-
-
-啟動 Monitor：
+- **Bitcoin Core v28+** running in Regtest mode with ZMQ enabled
+- **Python 3.10+**
+- Dependencies:
 
 ```bash
+pip install pyzmq requests cryptography
+```
 
+---
+
+## Quick Start
+
+### 1. Start Bitcoin Core (Regtest)
+
+```bash
+bitcoind -regtest \
+  -rpcuser=acs \
+  -rpcpassword=acs123 \
+  -zmqpubrawtx=tcp://127.0.0.1:28333 \
+  -daemon
+```
+
+### 2. Run the Phase 6 Simulation Demo
+
+```bash
+cd C:\ACS
+python demo_run.py
+```
+
+This single command will:
+1. Self-test `gpio_mock` (PIN 17 HIGH → LOW cycle)
+2. Start the Phase 6 ZMQ listener in a background thread
+3. Execute `sender.py` to broadcast an encrypted `UNLOCK_DOOR_01` command
+4. Wait for the transaction to arrive over ZMQ
+5. Validate the ACS protocol header + timestamp
+6. Fire `gpio_mock.trigger_lock(pin=17, duration=3s)`
+7. Print the final GPIO log and a completion summary
+
+### 3. Run Components Individually
+
+**Start the monitor (Phase 1–3 only):**
+```bash
 python monitor.py
-
 ```
 
-
-
-發送指令：
-
+**Send a command transaction (Phase 1–5):**
 ```bash
-
 python sender.py
-
 ```
 
+**Start the Phase 6 GPIO listener standalone:**
+```bash
+python phase6_listener.py
+```
 
+---
 
-\## 開發進度
+## Phase 6 — GPIO Hardware Simulation
 
+Phase 6 completes the end-to-end pipeline by replacing the placeholder `UNLOCK_DOOR_01` print statement with a real GPIO trigger layer.
 
+### `gpio_mock.py`
 
-\- \[x] Phase 1：ZMQ 即時監聽
+Provides a drop-in mock for `RPi.GPIO` so the system can be developed and tested on any platform without physical hardware:
 
-\- \[x] Phase 2：Timestamp 防重放驗證
+```python
+import gpio_mock
 
-\- \[x] Phase 3：0/3/6 確認階梯狀態機
+gpio_mock.trigger_lock(pin=17, duration_sec=3)
+```
 
-\- \[x] Phase 4：地址跳變 + 噪音注入
+Console output:
+```
+[2026-03-28 19:07:14] GPIO PIN 17 → HIGH (鎖已開啟 🔓)
+[2026-03-28 19:07:17] GPIO PIN 17 → LOW  (鎖已關閉 🔒)
+```
 
-\- \[x] Phase 5：ECDH 加密 + Taproot
+All events are appended to `gpio_log.txt` with timestamps.
 
-\- \[ ] Phase 6：真實硬體 GPIO 接線
+### Porting to Real Hardware (Raspberry Pi)
 
+To run on a physical RPi, replace the `gpio_mock` import with the real library:
 
+```python
+# phase6_listener.py  — swap this line:
+import gpio_mock as GPIO
 
-\## 作者
+# with:
+import RPi.GPIO as GPIO
+```
 
+No other code changes are required — the interface is identical.
 
+---
 
-Andy Lin — 電子工程學系專題 2026
+## Protocol Payload Structure
 
+The `OP_RETURN` field carries a 44-byte ACS payload:
+
+```
+Bytes  0– 3   Protocol header        b'ACS_'
+Bytes  4–11   Nonce (anti-replay)    8 bytes random
+Bytes 12–15   Timestamp              uint32 big-endian (Unix epoch)
+Bytes 16–43   Signature fingerprint  28-byte ECDSA sig prefix
+```
+
+---
+
+## Development Progress
+
+- [x] **Phase 1** — ZMQ real-time transaction monitoring
+- [x] **Phase 2** — Timestamp replay-attack prevention
+- [x] **Phase 3** — 0 / 3 / 6 confirmation ladder state machine
+- [x] **Phase 4** — Address rotation + noise transaction injection
+- [x] **Phase 5** — ECDH encryption (X25519 + AES-256-GCM) + Taproot addresses
+- [x] **Phase 6** — GPIO hardware trigger simulation (`gpio_mock`, `phase6_listener`, `demo_run`)
+
+---
+
+## Author
+
+**Andy Lin** — Electronic Engineering Department Capstone Project, 2026
